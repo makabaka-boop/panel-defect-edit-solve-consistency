@@ -1,9 +1,32 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 // SVG 每格像素
 const CELL = 56;
 
+// 数字输入：本地草稿 + 仅提交范围内合法整数。
+// 选中全值重输、退格清空等中间态（空串、越界、非整数）只更新草稿，
+// 不提交给父组件——否则短暂空串会被 Number("") 当作 0 去缩小板面，
+// 把仍位于最终板面内的瑕疵标记永久冲掉。失焦时草稿还原为已确认值。
 function NumberField({ label, value, min, max, onChange }) {
+  const [draft, setDraft] = useState(String(value));
+  const [lastValue, setLastValue] = useState(value);
+
+  // 已确认值变化时同步草稿（渲染期间调整，避免效应时序问题）
+  if (value !== lastValue) {
+    setLastValue(value);
+    setDraft(String(value));
+  }
+
+  function handleChange(e) {
+    const raw = e.target.value;
+    setDraft(raw);
+    if (raw === "") return;
+    const n = Number(raw);
+    if (Number.isInteger(n) && n >= min && n <= max) {
+      onChange(n);
+    }
+  }
+
   return (
     <label className="field">
       <span>{label}</span>
@@ -11,8 +34,9 @@ function NumberField({ label, value, min, max, onChange }) {
         type="number"
         min={min}
         max={max}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
+        value={draft}
+        onChange={handleChange}
+        onBlur={() => setDraft(String(value))}
       />
     </label>
   );
@@ -29,14 +53,25 @@ export default function App() {
   const [solution, setSolution] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  // 求解请求序号：每次发起求解或输入变化都递增，
+  // 在途旧请求返回时序号已落后，其成功/失败结果一律丢弃
+  const reqSeq = useRef(0);
 
-  // 板尺寸变化后，清掉越界瑕疵与旧方案
+  // 任何输入变化：作废旧方案与错误提示，并使未返回的旧请求失效，
+  // 保证瑕疵、板面、图形、统计与切割清单始终对应同一版已确认输入
+  function invalidateSolution() {
+    reqSeq.current += 1;
+    setSolution(null);
+    setError(null);
+    setLoading(false);
+  }
+
+  // 板尺寸变化后，清掉越界瑕疵与旧方案（nw/nh 必为合法值，中间态不会到达这里）
   function resizeBoard(nw, nh) {
     setBoardW(nw);
     setBoardH(nh);
     setDefects((ds) => ds.filter((d) => d.x < nw && d.y < nh));
-    setSolution(null);
-    setError(null);
+    invalidateSolution();
   }
 
   function toggleCell(x, y) {
@@ -46,11 +81,11 @@ export default function App() {
         ? ds.filter((d) => !(d.x === x && d.y === y))
         : [...ds, { x, y }];
     });
-    setSolution(null);
-    setError(null);
+    invalidateSolution();
   }
 
   async function solve() {
+    const myId = ++reqSeq.current;
     setLoading(true);
     setError(null);
     setSolution(null);
@@ -76,11 +111,16 @@ export default function App() {
           `请求失败 (${resp.status})`;
         throw new Error(Array.isArray(msg) ? msg.join("\n") : String(msg));
       }
-      setSolution(await resp.json());
+      const data = await resp.json();
+      // 请求在途期间输入已变（或已发起更新的求解）：丢弃过期成功结果
+      if (myId !== reqSeq.current) return;
+      setSolution(data);
     } catch (e) {
+      // 同上：旧请求的失败提示不得出现在新输入已生效之后
+      if (myId !== reqSeq.current) return;
       setError(e.message);
     } finally {
-      setLoading(false);
+      if (myId === reqSeq.current) setLoading(false);
     }
   }
 
@@ -110,14 +150,14 @@ export default function App() {
             <NumberField label="板高 (2–10)" value={boardH} min={2} max={10}
               onChange={(v) => resizeBoard(boardW, v)} />
             <NumberField label="件宽 (1–5)" value={pieceW} min={1} max={5}
-              onChange={(v) => { setPieceW(v); setSolution(null); }} />
+              onChange={(v) => { setPieceW(v); invalidateSolution(); }} />
             <NumberField label="件高 (1–5)" value={pieceH} min={1} max={5}
-              onChange={(v) => { setPieceH(v); setSolution(null); }} />
+              onChange={(v) => { setPieceH(v); invalidateSolution(); }} />
             <label className="field checkbox">
               <input
                 type="checkbox"
                 checked={allowRotation}
-                onChange={(e) => { setAllowRotation(e.target.checked); setSolution(null); }}
+                onChange={(e) => { setAllowRotation(e.target.checked); invalidateSolution(); }}
               />
               <span>允许旋转 90°</span>
             </label>
@@ -125,7 +165,7 @@ export default function App() {
               <input
                 type="checkbox"
                 checked={kerfCells === 1}
-                onChange={(e) => { setKerfCells(e.target.checked ? 1 : 0); setSolution(null); }}
+                onChange={(e) => { setKerfCells(e.target.checked ? 1 : 0); invalidateSolution(); }}
               />
               <span>锯缝 1 格</span>
             </label>
